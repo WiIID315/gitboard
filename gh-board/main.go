@@ -4,6 +4,7 @@ import (
 	"embed"
 
 	"github.com/wailsapp/wails/v2"
+	"github.com/wailsapp/wails/v2/pkg/menu"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 )
@@ -14,6 +15,10 @@ var assets embed.FS
 func main() {
 	// Create an instance of the app structure
 	app := NewApp()
+
+	appMenu := menu.NewMenu()
+	appMenu.Append(menu.AppMenu())
+	appMenu.Append(menu.EditMenu())
 
 	// Create application with options
 	err := wails.Run(&options.App{
