@@ -6,6 +6,14 @@ export function FetchRepos(arg1) {
   return window['go']['main']['App']['FetchRepos'](arg1);
 }
 
+export function InitiateDeviceFlow() {
+  return window['go']['main']['App']['InitiateDeviceFlow']();
+}
+
+export function PollForToken(arg1, arg2) {
+  return window['go']['main']['App']['PollForToken'](arg1, arg2);
+}
+
 export function SetVisibilityBatch(arg1, arg2, arg3) {
   return window['go']['main']['App']['SetVisibilityBatch'](arg1, arg2, arg3);
 }

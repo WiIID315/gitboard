@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -35,6 +37,112 @@ type BatchResult struct {
 	FullName string `json:"full_name"`
 	Success  bool   `json:"success"`
 	Error    string `json:"error,omitempty"`
+}
+
+type DeviceCodeResponse struct {
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
+}
+
+type AccessTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	Scope       string `json:"scope"`
+	Error       string `json:"error"`
+}
+
+const GitHubClientID = "Ov23lidYZ0a2acqiml2g"
+
+func (a *App) InitiateDeviceFlow() (*DeviceCodeResponse, error) {
+	data := url.Values{}
+	data.Set("client_id", GitHubClientID)
+	data.Set("scope", "repo")
+
+	req, err := http.NewRequest("POST", "https://github.com/login/device/code", strings.NewReader(data.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github device flow error: %s", resp.Status)
+	}
+
+	var dr DeviceCodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&dr); err != nil {
+		return nil, err
+	}
+	return &dr, nil
+}
+
+func (a *App) PollForToken(deviceCode string, interval int) (string, error) {
+	if interval < 5 {
+		interval = 5
+	}
+
+	data := url.Values{}
+	data.Set("client_id", GitHubClientID)
+	data.Set("device_code", deviceCode)
+	data.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-a.ctx.Done():
+			return "", fmt.Errorf("authentication cancelled")
+		case <-ticker.C:
+			req, err := http.NewRequest("POST", "https://github.com/login/oauth/access_token", strings.NewReader(data.Encode()))
+			if err != nil {
+				return "", err
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+
+			resp, err := client.Do(req)
+			if err != nil {
+				return "", err
+			}
+
+			var tokenResp AccessTokenResponse
+			err = json.NewDecoder(resp.Body).Decode(&tokenResp)
+			resp.Body.Close()
+			if err != nil {
+				return "", err
+			}
+
+			switch tokenResp.Error {
+			case "":
+				if tokenResp.AccessToken != "" {
+					return tokenResp.AccessToken, nil
+				}
+			case "authorization_pending":
+				continue
+			case "slow_down":
+				ticker.Reset(time.Duration(interval+5) * time.Second)
+				continue
+			case "expired_token":
+				return "", fmt.Errorf("device code expired, please try again")
+			case "access_denied":
+				return "", fmt.Errorf("authorization was cancelled by user")
+			default:
+				return "", fmt.Errorf("oauth error: %s", tokenResp.Error)
+			}
+		}
+	}
 }
 
 // FetchRepos gets all repos owned by the authenticated user

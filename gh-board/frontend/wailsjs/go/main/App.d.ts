@@ -4,4 +4,8 @@ import {main} from '../models';
 
 export function FetchRepos(arg1:string):Promise<Array<main.Repository>>;
 
+export function InitiateDeviceFlow():Promise<main.DeviceCodeResponse>;
+
+export function PollForToken(arg1:string,arg2:number):Promise<string>;
+
 export function SetVisibilityBatch(arg1:string,arg2:Array<string>,arg3:boolean):Promise<Array<main.BatchResult>>;

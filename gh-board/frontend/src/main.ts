@@ -1,15 +1,28 @@
-// Auto-generated Go bindings from Wails
-import { FetchRepos, SetVisibilityBatch } from '../wailsjs/go/main/App';
-import { main } from '../wailsjs/go/models';
+import { FetchRepos, SetVisibilityBatch, InitiateDeviceFlow, PollForToken } from '../wailsjs/go/main/App';
+import { BrowserOpenURL } from '../wailsjs/runtime/runtime';
 
-// Local UI state
-let repos: main.Repository[] = [];
-let token = '';
+interface Repository {
+  id: number;
+  name: string;
+  full_name: string;
+  private: boolean;
+  stargazers_count: number;
+  pushed_at: string;
+}
 
-// DOM Elements
+let repos: Repository[] = [];
+let accessToken = localStorage.getItem('gh_token') || '';
+let verificationUri = '';
+
 const elements = {
-  tokenInput: document.getElementById('tokenInput') as HTMLInputElement,
+  authSection: document.getElementById('authSection') as HTMLDivElement,
+  userSection: document.getElementById('userSection') as HTMLDivElement,
+  loginBtn: document.getElementById('loginBtn') as HTMLButtonElement,
+  logoutBtn: document.getElementById('logoutBtn') as HTMLButtonElement,
   fetchBtn: document.getElementById('fetchBtn') as HTMLButtonElement,
+  authModal: document.getElementById('authModal') as HTMLDivElement,
+  userCodeDisplay: document.getElementById('userCodeDisplay') as HTMLSpanElement,
+  openBrowserBtn: document.getElementById('openBrowserBtn') as HTMLButtonElement,
   filterSelect: document.getElementById('visibilityFilter') as HTMLSelectElement,
   logs: document.getElementById('logs') as HTMLDivElement,
   repoCount: document.getElementById('repoCount') as HTMLSpanElement,
@@ -28,13 +41,24 @@ function log(msg: string) {
   elements.logs.scrollTop = elements.logs.scrollHeight;
 }
 
-// 2. Toggle the visibility of the bulk actions button group
+// 2. Toggle Auth UI based on whether a token exists
+function updateAuthState() {
+  const isAuthenticated = !!accessToken;
+  elements.authSection.classList.toggle('hidden', isAuthenticated);
+  elements.userSection.classList.toggle('hidden', !isAuthenticated);
+
+  if (isAuthenticated && repos.length === 0) {
+    loadRepositories();
+  }
+}
+
+// 3. Toggle bulk actions toolbar
 function updateBulkState() {
   const checked = document.querySelectorAll<HTMLInputElement>('.repo-select:checked');
   elements.bulkActions.classList.toggle('hidden', checked.length === 0);
 }
 
-// 3. Render the repo table based on active filter
+// 4. Render Table
 function renderTable() {
   const filter = elements.filterSelect.value;
   const filtered = repos.filter((r) => {
@@ -80,46 +104,17 @@ function renderTable() {
   updateBulkState();
 }
 
-// 1. Fetch Repositories via Go Backend
-elements.fetchBtn.addEventListener('click', async () => {
-  token = elements.tokenInput.value.trim();
-  if (!token) return alert('Enter a PAT');
-
-  log('Calling Go backend to fetch repos...');
+// 5. Fetch repositories using active access token
+async function loadRepositories() {
+  if (!accessToken) return;
+  log('Fetching repositories from GitHub...');
   try {
-    repos = await FetchRepos(token);
-    log(`Successfully fetched ${repos.length} repositories.`);
+    repos = await FetchRepos(accessToken);
+    log(`Fetched ${repos.length} repositories.`);
     renderTable();
   } catch (err: any) {
-    log(`Go Error: ${err}`);
+    log(`Error fetching repos: ${err}`);
   }
-});
-
-// 2. Batch Update Visibility via Go Backend
-async function runBatchMutation(makePrivate: boolean) {
-  const selected = Array.from(
-    document.querySelectorAll<HTMLInputElement>('.repo-select:checked')
-  ).map((cb) => cb.dataset.fullName!);
-
-  const targetLabel = makePrivate ? 'private' : 'public';
-  log(`Batch updating ${selected.length} repositories to ${targetLabel}...`);
-
-  try {
-    const results = await SetVisibilityBatch(token, selected, makePrivate);
-    for (const res of results) {
-      if (res.success) {
-        log(`✓ ${res.full_name} -> ${targetLabel}`);
-        const r = repos.find((repo) => repo.full_name === res.full_name);
-        if (r) r.private = makePrivate;
-      } else {
-        log(`✗ Failed ${res.full_name}: ${res.error}`);
-      }
-    }
-  } catch (err: any) {
-    log(`Batch error: ${err}`);
-  }
-
-  renderTable();
 }
 
 // 1. Button and Filter Event Listeners
@@ -151,7 +146,7 @@ elements.repoTableBody.addEventListener('click', async (e) => {
 
   log(`Updating ${fullName}...`);
   try {
-    const results = await SetVisibilityBatch(token, [fullName], targetPrivate);
+    const results = await SetVisibilityBatch(accessToken, [fullName], targetPrivate);
     if (results[0]?.success) {
       log(`✓ ${fullName} updated.`);
       const r = repos.find((repo) => repo.full_name === fullName);
@@ -164,3 +159,124 @@ elements.repoTableBody.addEventListener('click', async (e) => {
     log(`Error: ${err}`);
   }
 });
+
+// 1. OAuth Sign In Flow
+elements.loginBtn.addEventListener('click', async () => {
+  log('Requesting GitHub device authorization code...');
+  try {
+    const res = await InitiateDeviceFlow();
+    verificationUri = res.verification_uri;
+
+    // Display the code in UI
+    elements.userCodeDisplay.textContent = res.user_code;
+    elements.authModal.classList.remove('hidden');
+
+    // Automatically copy code to clipboard & open browser
+    await navigator.clipboard.writeText(res.user_code);
+    log(`Code ${res.user_code} copied to clipboard! Opening browser...`);
+    BrowserOpenURL(verificationUri);
+
+    // Poll backend until user finishes in browser
+    const token = await PollForToken(res.device_code, res.interval);
+    accessToken = token;
+    localStorage.setItem('gh_token', token);
+    elements.authModal.classList.add('hidden');
+    log('Authentication successful!');
+    updateAuthState();
+  } catch (err: any) {
+    log(`Auth error: ${err}`);
+    elements.authModal.classList.add('hidden');
+  }
+});
+
+// 2. Open Verification Page Button in Modal
+elements.openBrowserBtn.addEventListener('click', () => {
+  if (verificationUri) {
+    BrowserOpenURL(verificationUri);
+  }
+});
+
+// 3. Sign Out
+elements.logoutBtn.addEventListener('click', () => {
+  localStorage.removeItem('gh_token');
+  accessToken = '';
+  repos = [];
+  elements.repoTableBody.innerHTML = '';
+  elements.repoCount.textContent = '0';
+  log('Signed out.');
+  updateAuthState();
+});
+
+// 4. Manual Refresh Button
+elements.fetchBtn.addEventListener('click', loadRepositories);
+
+// 5. Batch Mutation Logic
+async function runBatchMutation(makePrivate: boolean) {
+  const selected = Array.from(
+    document.querySelectorAll<HTMLInputElement>('.repo-select:checked')
+  ).map((cb) => cb.dataset.fullName!);
+
+  const targetLabel = makePrivate ? 'private' : 'public';
+  log(`Batch updating ${selected.length} repositories to ${targetLabel}...`);
+
+  try {
+    const results = await SetVisibilityBatch(accessToken, selected, makePrivate);
+    for (const res of results) {
+      if (res.success) {
+        log(`✓ ${res.full_name} -> ${targetLabel}`);
+        const r = repos.find((repo) => repo.full_name === res.full_name);
+        if (r) r.private = makePrivate;
+      } else {
+        log(`✗ Failed ${res.full_name}: ${res.error}`);
+      }
+    }
+  } catch (err: any) {
+    log(`Batch error: ${err}`);
+  }
+
+  renderTable();
+}
+
+elements.bulkPrivateBtn.addEventListener('click', () => runBatchMutation(true));
+elements.bulkPublicBtn.addEventListener('click', () => runBatchMutation(false));
+elements.filterSelect.addEventListener('change', renderTable);
+
+// 6. Select All & Table Interaction
+elements.selectAll.addEventListener('change', (e) => {
+  const isChecked = (e.target as HTMLInputElement).checked;
+  document.querySelectorAll<HTMLInputElement>('.repo-select').forEach((cb) => (cb.checked = isChecked));
+  updateBulkState();
+});
+
+elements.repoTableBody.addEventListener('change', (e) => {
+  if ((e.target as HTMLElement).classList.contains('repo-select')) {
+    updateBulkState();
+  }
+});
+
+// 7. Single Row Quick Toggle
+elements.repoTableBody.addEventListener('click', async (e) => {
+  const button = (e.target as HTMLElement).closest<HTMLButtonElement>('button[data-action="toggle-single"]');
+  if (!button) return;
+
+  const fullName = button.dataset.fullName!;
+  const targetPrivate = button.dataset.targetPrivate === 'true';
+
+  log(`Updating ${fullName}...`);
+  try {
+    const results = await SetVisibilityBatch(accessToken, [fullName], targetPrivate);
+    if (results[0]?.success) {
+      log(`✓ ${fullName} updated.`);
+      const r = repos.find((repo) => repo.full_name === fullName);
+      if (r) r.private = targetPrivate;
+      renderTable();
+    } else {
+      log(`✗ Failed: ${results[0]?.error}`);
+    }
+  } catch (err: any) {
+    log(`Error: ${err}`);
+  }
+});
+
+// Initialize authentication status on startup
+updateAuthState();
